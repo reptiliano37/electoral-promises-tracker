@@ -1,0 +1,312 @@
+// Electoral Promise Tracker — Prisma schema
+// PostgreSQL. Diseño multi-país (campo `countryCode` en entidades raíz).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  ANALYST
+  MODERATOR
+  READER
+}
+
+enum PromiseStatus {
+  no_iniciada
+  en_progreso
+  parcialmente_cumplida
+  cumplida
+  incumplida
+  no_verificable
+}
+
+enum ReviewDecision {
+  approved
+  rejected
+  changes_requested
+  escalated
+}
+
+enum SourceType {
+  official      // BOE, portales de transparencia, diarios de sesiones
+  press         // medios de comunicación
+  ngo           // ONG / think tanks
+  academic
+  other
+}
+
+enum AuditAction {
+  create
+  update
+  delete
+  status_change
+  score_recalculated
+  review_decision
+  login
+}
+
+// ─────────────────────────────────────────────────────────────
+// IDENTIDAD / ORGANIZACIÓN
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  name           String?
+  role           Role     @default(READER)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  isActive       Boolean  @default(true)
+  gdprConsentAt  DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  authoredPromises Promise[]           @relation("PromiseAuthor")
+  statusChanges    PromiseStatusHistory[]
+  reviews          ModerationReview[]
+  scores           PromiseScore[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+
+  @@index([role])
+  @@index([organizationId])
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  countryCode String   @default("ES")
+  createdAt   DateTime @default(now())
+  users       User[]
+
+  @@unique([name, countryCode])
+}
+
+// ─────────────────────────────────────────────────────────────
+// DOMINIO ELECTORAL
+// ─────────────────────────────────────────────────────────────
+
+model Election {
+  id          String   @id @default(cuid())
+  countryCode String   @default("ES")
+  name        String                 // "Elecciones Generales 2023"
+  type        String                 // general | autonomica | municipal | europea
+  electionDate DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  candidates  Candidate[]
+  promises    Promise[]
+
+  @@unique([countryCode, name])
+  @@index([electionDate])
+}
+
+model Party {
+  id          String   @id @default(cuid())
+  countryCode String   @default("ES")
+  name        String
+  shortName   String
+  createdAt   DateTime @default(now())
+
+  candidates  Candidate[]
+  promises    Promise[]
+
+  @@unique([countryCode, shortName])
+  @@index([countryCode])
+}
+
+model Candidate {
+  id          String   @id @default(cuid())
+  fullName    String
+  partyId     String
+  party       Party    @relation(fields: [partyId], references: [id])
+  electionId  String
+  election    Election @relation(fields: [electionId], references: [id])
+  createdAt   DateTime @default(now())
+
+  promises    Promise[]
+
+  @@unique([fullName, electionId])
+  @@index([partyId])
+  @@index([electionId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// PROMESAS
+// ─────────────────────────────────────────────────────────────
+
+model Promise {
+  id           String        @id @default(cuid())
+  slug         String        @unique
+  title        String
+  description  String
+  topic        String                       // sanidad | economia | educacion | vivienda...
+  electionId   String
+  election     Election      @relation(fields: [electionId], references: [id])
+  partyId      String
+  party        Party         @relation(fields: [partyId], references: [id])
+  candidateId  String?
+  candidate    Candidate?    @relation(fields: [candidateId], references: [id])
+  authorId     String
+  author       User          @relation("PromiseAuthor", fields: [authorId], references: [id])
+
+  currentStatus PromiseStatus @default(no_iniciada)
+  currentScore  Int?                          // 0-100 (snapshot del último score publicado)
+  isPublished   Boolean       @default(false)
+
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  statusHistory PromiseStatusHistory[]
+  evidenceItems EvidenceItem[]
+  scores        PromiseScore[]
+  reviews       ModerationReview[]
+
+  @@index([partyId])
+  @@index([electionId])
+  @@index([topic])
+  @@index([currentStatus])
+  @@index([isPublished])
+}
+
+model PromiseStatusHistory {
+  id          String        @id @default(cuid())
+  promiseId   String
+  promise     Promise       @relation(fields: [promiseId], references: [id], onDelete: Cascade)
+  fromStatus  PromiseStatus?
+  toStatus    PromiseStatus
+  reason      String
+  changedById String
+  changedBy   User          @relation(fields: [changedById], references: [id])
+  createdAt   DateTime      @default(now())
+
+  @@index([promiseId])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// EVIDENCIAS
+// ─────────────────────────────────────────────────────────────
+
+model EvidenceSource {
+  id            String       @id @default(cuid())
+  name          String
+  type          SourceType
+  baseUrl       String?
+  trustWeight   Float        @default(0.5)   // 0..1 confianza de la fuente
+  createdAt     DateTime     @default(now())
+
+  evidenceItems EvidenceItem[]
+
+  @@unique([name])
+  @@index([type])
+}
+
+model EvidenceItem {
+  id          String         @id @default(cuid())
+  promiseId   String
+  promise     Promise        @relation(fields: [promiseId], references: [id], onDelete: Cascade)
+  sourceId    String
+  source      EvidenceSource @relation(fields: [sourceId], references: [id])
+  url         String
+  title       String
+  excerpt     String?
+  publishedAt DateTime?
+  dimension   String                          // referencia a ScoringDimension.key
+  supportsProgress Boolean   @default(true)    // apoya avance (true) o contradice (false)
+  verified    Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+
+  @@index([promiseId])
+  @@index([sourceId])
+  @@index([dimension])
+}
+
+// ─────────────────────────────────────────────────────────────
+// SCORING
+// ─────────────────────────────────────────────────────────────
+
+model ScoringDimension {
+  id        String   @id @default(cuid())
+  key       String   @unique                  // avance_legislativo | presupuesto | ejecucion | impacto
+  label     String
+  weight    Float                              // pesos suman 1.0
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model PromiseScore {
+  id          String   @id @default(cuid())
+  promiseId   String
+  promise     Promise  @relation(fields: [promiseId], references: [id], onDelete: Cascade)
+  scoreValue  Int                              // 0-100 total ponderado
+  breakdown   Json                             // { avance_legislativo: 60, presupuesto: 40, ... }
+  confidence  Float                            // 0..1 media ponderada de trustWeight
+  algoVersion String                           // "scoring@1.0.0" (reproducibilidad)
+  computedById String?
+  computedBy  User?    @relation(fields: [computedById], references: [id])
+  isPublished Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([promiseId])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODERACIÓN Y AUDITORÍA
+// ─────────────────────────────────────────────────────────────
+
+model ModerationReview {
+  id          String         @id @default(cuid())
+  promiseId   String
+  promise     Promise        @relation(fields: [promiseId], references: [id], onDelete: Cascade)
+  reviewerId  String
+  reviewer    User           @relation(fields: [reviewerId], references: [id])
+  decision    ReviewDecision
+  notes       String?
+  createdAt   DateTime       @default(now())
+
+  @@index([promiseId])
+  @@index([reviewerId])
+}
+
+// Auditoría inmutable: sólo INSERT (no update/delete a nivel de app y policy DB).
+model AuditLog {
+  id         String      @id @default(cuid())
+  actorId    String?
+  actor      User?       @relation(fields: [actorId], references: [id])
+  action     AuditAction
+  entityType String                          // "Promise" | "PromiseScore" | ...
+  entityId   String
+  before     Json?
+  after      Json?
+  ip         String?
+  createdAt  DateTime    @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  payload   Json
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt])
+}
